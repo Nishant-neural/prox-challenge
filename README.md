@@ -1,92 +1,177 @@
-# Prox Founding Engineer Challenge
+# Vulcan OmniPro 220 — Multimodal Expert Agent
 
-<img src="product.webp" alt="Vulcan OmniPro 220" width="400" /> <img src="product-inside.webp" alt="Vulcan OmniPro 220 — inside panel" width="400" />
+An AI welding assistant that behaves like an experienced technician standing beside you.
+Built on Claude + Qdrant + SQLite with a React frontend for interactive artifacts.
 
-## The Product
+---
 
-The [Vulcan OmniPro 220](https://www.harborfreight.com/omnipro-220-industrial-multiprocess-welder-with-120240v-input-57812.html) is a multiprocess welding system sold by Harbor Freight. It supports four welding processes (MIG, Flux-Cored, TIG, and Stick), runs on both 120V and 240V input, and has an LCD-based synergic control system.
+## Architecture
 
-Its owner's manual is 48 pages of dense technical content. Duty cycle matrices across multiple voltages and amperages, polarity setup procedures that differ per welding process, wire feed mechanisms with specific tensioner calibrations, wiring schematics, troubleshooting matrices, weld diagnosis diagrams, and a full parts list.
-
-This is exactly the kind of product Prox exists for. Nobody knows how to use this machine straight out of the box but has time to read 48 page manual, but a complicated machine needs expert-level support.
-
-Additional video: https://www.youtube.com/watch?v=kxGDoGcnhBw
-
-## Your Job
-
-Build a multimodal reasoning agent for the Vulcan OmniPro 220 using the Claude Agent SDK. The agent must be able to answer deep technical questions about this product accurately, helpfully, and not just in text.
-
-The manuals are in the `files/` directory.
-
-**There is no limit to how far you can go.** You can integrate voice. You can build a full interactive experience. Sky is the limit. The more ambitious and polished, the better.
-
-## What We're Testing
-
-### 1. Deep Technical Accuracy
-
-Your agent needs to answer questions like these correctly:
-
-- "What's the duty cycle for MIG welding at 200A on 240V?"
-- "I'm getting porosity in my flux-cored welds. What should I check?"
-- "What polarity setup do I need for TIG welding? Which socket does the ground clamp go in?"
-
-We will test with questions that require cross-referencing multiple manual sections, understanding visual content (diagrams, schematics, charts), and handling ambiguous questions that need clarification from the user.
-
-### 2. Multimodal Responses
-
-This is the most important part. Your agent must not be text-only.
-
-- If someone asks about polarity setup, the agent should draw or show a diagram of which cable goes in which socket, not just describe it.
-- If the answer relates to a specific image in the manual (the wire feed mechanism, the front panel controls, the weld diagnosis examples), the agent should surface that image.
-- If a question is complex enough, the agent should generate interactive content: a duty cycle calculator, a troubleshooting flowchart, a settings configurator that takes process + material + thickness and outputs recommended wire speed and voltage.
-
-When something is too cognitively hard to explain in words, the agent should draw it. Real-time diagrams, interactive schematics, visual walkthroughs generated through code.
-
-For your agent to handle these responses well you need to reverse engineer Claude artifacts. Here are two places where you can start:
-- https://claude.ai/artifacts (see how Claude renders interactive artifacts in chat)
-- https://www.reidbarber.com/blog/reverse-engineering-claude-artifacts
-
-### 3. Tone and Helpfulness
-
-Imagine your user just bought this welder and is standing in their garage trying to set it up. They're not an idiot, but they're not a professional welder either.
-
-### 4. Knowledge Extraction Quality
-
-The manual has a mix of text, tables, labeled diagrams, schematics, and decision matrices. Some critical information exists only in images (the welding process selection chart, the weld diagnosis photos, the wiring schematic). We want to see that your agent understands and presents the visual content, not just the text.
-
-## Tech Requirements
-
-- Use the [Anthropic Claude Agent SDK](https://docs.anthropic.com) as the foundation for your agent.
-- The project must run locally with a single API key provided via `.env`.
-- You are responsible for your own API costs during development.
-
-## How to Present Your Work
-
-**This matters.** Your submission is not just the code — it's how you present it.
-
-- **Build a frontend.** The best way for us to evaluate your agent is if it has a clean, simple UI we can run immediately. This is realistically the only way to properly demo an agent like this.
-- **Hosting is a plus.** If you host it somewhere we can access without cloning, that's a strong signal. Not required, but it removes friction and shows initiative.
-- **Write a clear README.** Explain how your agent works, what design decisions you made, how knowledge is extracted and represented, and how to run it. Your documentation will be evaluated — we want to see how you think and communicate, not just how you code.
-- **Video walkthrough is a huge plus.** Record yourself demoing the agent and explaining your approach. Walk through the hard questions, show how it handles multimodal responses, explain your architecture. This gives us a much richer picture of your work than code alone.
-
-We should be running your agent within 2 minutes of cloning your repo:
-
-```bash
-git clone <your-fork>
-cd <your-fork>
-cp .env.example .env   # we plug in our own Anthropic API key
-# your install command (npm install, uv install, etc.)
-# your run command (npm run dev, python app.py, etc.)
+```
+User
+ │
+ ▼
+React Frontend  (Vite + Tailwind)
+ │  Chat UI + Artifact renderer
+ │
+ ▼ SSE stream
+FastAPI Backend
+ │
+ ├─ Claude Agent (tool_use loop)
+ │     ├── search_manual      → Qdrant text collection
+ │     ├── lookup_table       → SQLite exact query
+ │     ├── find_diagram       → Qdrant image collection
+ │     ├── get_manual_page    → Screenshot files
+ │     └── generate_artifact  → Frontend artifact signal
+ │
+ ├─ Qdrant  (manual_text + manual_images)
+ ├─ SQLite  (tables.db — duty cycles, settings, specs)
+ └─ knowledge/  (images/, screenshots/, chunks.json)
 ```
 
-If it takes longer than that to set up, that's a problem.
+---
 
-## What to Submit
+## Quick Start
 
-1. Fork this repo.
-2. Build your solution.
-3. Submit your fork URL through the form at [useprox.com/join/challenge](https://useprox.com/join/challenge).
+### 1. Prerequisites
 
-## What Happens Next
+- Python 3.11+
+- Node 18+
+- Docker (for Qdrant)
 
-We review submissions on a rolling basis and respond to every single one within a few days. Good luck.
+### 2. Clone & install
+
+```bash
+git clone <repo>
+cd omnipro-agent
+
+# Backend
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# Frontend
+cd frontend && npm install && cd ..
+```
+
+### 3. Configure
+
+```bash
+cp .env.example .env
+# Edit .env — add your ANTHROPIC_API_KEY
+```
+
+### 4. Start Qdrant
+
+```bash
+docker compose up -d
+```
+
+### 5. Ingest the manual
+
+Place the PDF at `manuals/pdf/vulcan_omnipro_220.pdf`, then:
+
+```bash
+python scripts/ingest.py --pdf manuals/pdf/vulcan_omnipro_220.pdf
+```
+
+This will:
+- Extract all text chunks, tables, images, and page screenshots
+- Caption images with Claude Vision
+- Upsert embeddings into Qdrant
+- Store structured tables in SQLite
+
+Takes ~5–15 minutes depending on PDF size and image count.
+
+**Flags:**
+```
+--no-captions   Skip Claude Vision (faster; images unsearchable)
+--reset         Drop and recreate Qdrant collections
+--skip-images   Skip image extraction entirely
+```
+
+### 6. Run the backend
+
+```bash
+uvicorn backend.app:app --reload
+# → http://localhost:8000
+# → http://localhost:8000/api/health
+```
+
+### 7. Run the frontend
+
+```bash
+cd frontend
+npm run dev
+# → http://localhost:5173
+```
+
+---
+
+## Project Structure
+
+```
+omnipro-agent/
+├── backend/
+│   ├── config.py              # All settings (Pydantic + .env)
+│   ├── app.py                 # FastAPI — SSE /api/chat + image serving
+│   ├── agent.py               # Claude agentic loop (tool_use)
+│   ├── tools/
+│   │   └── manual_tools.py    # Tool schemas + ToolExecutor
+│   ├── retrieval/
+│   │   ├── vector_store.py    # Qdrant text + image search
+│   │   └── table_store.py     # SQLite table lookup
+│   └── preprocessing/
+│       └── pdf_extractor.py   # PDF → chunks + tables + images + screenshots
+├── frontend/
+│   └── src/
+│       ├── components/        # Chat, Message, SourceCitation, ImagePreview
+│       ├── artifacts/         # DutyCycleCalculator, PolarityDiagram, etc.
+│       └── pages/             # Main chat page
+├── scripts/
+│   └── ingest.py              # CLI ingestion runner
+├── knowledge/                 # Generated — chunks.json, images/, screenshots/
+├── manuals/pdf/               # Drop your PDF here
+├── docker-compose.yml         # Qdrant
+├── .env.example
+└── requirements.txt
+```
+
+---
+
+## SSE Event Types
+
+The `/api/chat` endpoint streams Server-Sent Events:
+
+| Event type | Description |
+|---|---|
+| `text_delta` | Incremental Claude text chunk |
+| `tool_call` | Claude decided to call a tool |
+| `tool_result` | Tool execution result (log) |
+| `artifact` | Render an interactive widget |
+| `done` | Final event with token usage + artifact list |
+| `error` | Something went wrong |
+
+---
+
+## Artifacts
+
+| Artifact type | Trigger |
+|---|---|
+| `duty_cycle_calculator` | "What's the duty cycle at 150A?" |
+| `duty_cycle_visualizer` | "Show me the duty cycle" |
+| `polarity_diagram` | "How do I set polarity for TIG?" |
+| `settings_configurator` | "I'm welding 3mm steel with MIG" |
+| `troubleshooting_wizard` | "My weld has porosity" |
+| `wire_feed_explainer` | "How does the wire feed work?" |
+
+---
+
+## Day-by-Day Build Plan
+
+| Day | Focus |
+|-----|-------|
+| 1 | Repo + pipeline + Qdrant + SQLite + ingest script ✅ |
+| 2 | Image extraction + Vision captions + agent tools + table lookup |
+| 3 | Artifacts: DutyCycleCalc, PolarityDiagram, TroubleshootingWizard, SettingsConfigurator |
+| 4 | Frontend polish + streaming + Manual Viewer + README + demo video |
