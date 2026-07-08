@@ -1,324 +1,120 @@
 """
-SQLite Table Store
-==================
-Stores all structured tables extracted from the manual.
-Supports exact-match queries by process, material, thickness, voltage, current.
-
-Schema
-------
-  tables      — one row per extracted table, JSON payload
-  table_rows  — one row per data row, with indexed columns for fast lookup
-
-Usage
------
-  store = TableStore()
-  store.ingest_tables(tables)
-  results = store.query(process="MIG", material="steel", thickness_mm=3.0)
+Table Store — SQLAlchemy ORM over SQLite.
+Structured tables from the manual (duty cycles, settings, specs).
 """
-
 from __future__ import annotations
-
-import json
-import sqlite3
-import sys
-from dataclasses import asdict
-from pathlib import Path
 from typing import Any
 
-from rich.console import Console
+from loguru import logger
+from sqlalchemy import JSON, Float, Integer, String, Text, create_engine, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from backend.config import settings
-from backend.preprocessing.pdf_extractor import TableRecord
-
-console = Console()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Schema
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── ORM models ─────────────────────────────────────────────────────────────────
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS tables (
-    table_id    TEXT PRIMARY KEY,
-    page        INTEGER,
-    section     TEXT,
-    caption     TEXT,
-    columns     TEXT,   -- JSON list
-    rows        TEXT,   -- JSON list of dicts
-    raw_text    TEXT
-);
+class Base(DeclarativeBase):
+    pass
 
--- Denormalized flat rows for lookup queries
-CREATE TABLE IF NOT EXISTS table_rows (
-    row_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    table_id    TEXT REFERENCES tables(table_id),
-    page        INTEGER,
-    section     TEXT,
 
-    -- Common welding parameters (NULL if not present in this table)
-    process     TEXT,   -- MIG, TIG, Stick, Flux Core
-    material    TEXT,   -- steel, stainless, aluminum, …
-    thickness   REAL,   -- mm
-    voltage     REAL,
-    current     REAL,
-    wire_size   TEXT,
-    gas_mix     TEXT,
-    duty_cycle  REAL,
+class ManualTable(Base):
+    __tablename__ = "manual_tables"
 
-    raw_row     TEXT    -- full JSON of the original row dict
-);
+    id:      Mapped[int]  = mapped_column(Integer, primary_key=True, autoincrement=True)
+    page:    Mapped[int]  = mapped_column(Integer, index=True)
+    section: Mapped[str]  = mapped_column(String)
+    html:    Mapped[str]  = mapped_column(Text)     # raw HTML from unstructured
+    text:    Mapped[str]  = mapped_column(Text)     # plain text fallback
 
-CREATE INDEX IF NOT EXISTS idx_rows_process   ON table_rows(process);
-CREATE INDEX IF NOT EXISTS idx_rows_material  ON table_rows(material);
-CREATE INDEX IF NOT EXISTS idx_rows_thickness ON table_rows(thickness);
-"""
+    # Parsed welding parameters (nullable — not every table has all fields)
+    process:    Mapped[str | None] = mapped_column(String, index=True)
+    material:   Mapped[str | None] = mapped_column(String)
+    thickness:  Mapped[float | None] = mapped_column(Float)
+    voltage:    Mapped[float | None] = mapped_column(Float)
+    current:    Mapped[float | None] = mapped_column(Float)
+    duty_cycle: Mapped[float | None] = mapped_column(Float)
+    rows:       Mapped[list | None]  = mapped_column(JSON)  # parsed rows list
 
-# Keyword → canonical column name mapping
-_FIELD_ALIASES: dict[str, str] = {
-    # process
-    "process": "process", "welding process": "process", "type": "process",
-    # material
-    "material": "material", "base metal": "material", "metal": "material",
-    # thickness
-    "thickness": "thickness", "thick": "thickness", "gauge": "thickness",
-    "thickness (mm)": "thickness", "thickness mm": "thickness",
-    # voltage
-    "voltage": "voltage", "volts": "voltage", "v": "voltage",
-    # current
-    "current": "current", "amps": "current", "amperage": "current", "a": "current",
-    # wire
-    "wire size": "wire_size", "wire diameter": "wire_size", "electrode": "wire_size",
-    # gas
-    "gas": "gas_mix", "shielding gas": "gas_mix", "gas mix": "gas_mix",
-    # duty cycle
-    "duty cycle": "duty_cycle", "duty": "duty_cycle",
-}
 
-_PROCESS_KEYWORDS: dict[str, list[str]] = {
-    "MIG": ["mig", "gmaw", "wire feed", "wire-feed"],
+# ── Engine (module-level singleton) ────────────────────────────────────────────
+
+_engine = create_engine(f"sqlite:///{settings.sqlite_path}", echo=False)
+Base.metadata.create_all(_engine)
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
+def ingest_tables(raw_tables: list[dict]):
+    """raw_tables come directly from pdf_extractor.extract()"""
+    with Session(_engine) as session:
+        for t in raw_tables:
+            session.add(ManualTable(
+                page=t["page"],
+                section=t.get("section", ""),
+                html=t.get("html", ""),
+                text=t.get("text", ""),
+                process=_infer_process(t.get("text", "")),
+                rows=_parse_html_rows(t.get("html", "")),
+            ))
+        session.commit()
+    logger.success(f"Ingested {len(raw_tables)} tables into SQLite")
+
+
+def query(
+    process: str | None = None,
+    material: str | None = None,
+    thickness_mm: float | None = None,
+    voltage: float | None = None,
+    current: float | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    stmt = select(ManualTable)
+    if process:
+        stmt = stmt.where(ManualTable.process == _normalize_process(process))
+    if thickness_mm:
+        lo, hi = thickness_mm * 0.85, thickness_mm * 1.15
+        stmt = stmt.where(ManualTable.thickness.between(lo, hi))
+    if voltage:
+        stmt = stmt.where(ManualTable.voltage.between(voltage - 2, voltage + 2))
+    if current:
+        stmt = stmt.where(ManualTable.current.between(current * 0.85, current * 1.15))
+
+    with Session(_engine) as session:
+        rows = session.scalars(stmt.limit(limit)).all()
+        return [{"page": r.page, "section": r.section, "text": r.text,
+                 "process": r.process, "rows": r.rows} for r in rows]
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+_PROCESS_MAP = {
+    "MIG": ["mig", "gmaw", "wire feed"],
     "TIG": ["tig", "gtaw", "tungsten"],
-    "Stick": ["stick", "smaw", "electrode", "shielded metal"],
-    "Flux Core": ["flux", "fcaw", "flux-cored", "flux core"],
+    "Stick": ["stick", "smaw"],
+    "Flux Core": ["flux", "fcaw", "flux-cored"],
 }
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Store
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TableStore:
-    def __init__(self, db_path: Path | None = None):
-        self._db_path = db_path or settings.sqlite_path
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._con = sqlite3.connect(str(self._db_path), check_same_thread=False)
-        self._con.row_factory = sqlite3.Row
-        self._con.executescript(_DDL)
-        self._con.commit()
-
-    # ── Ingestion ──────────────────────────────────────────────────────────────
-
-    def ingest_tables(self, tables: list[TableRecord]):
-        cur = self._con.cursor()
-        inserted_tables = 0
-        inserted_rows = 0
-
-        for tbl in tables:
-            # Skip if already ingested
-            existing = cur.execute(
-                "SELECT 1 FROM tables WHERE table_id = ?", (tbl.table_id,)
-            ).fetchone()
-            if existing:
-                continue
-
-            cur.execute(
-                """
-                INSERT INTO tables (table_id, page, section, caption, columns, rows, raw_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    tbl.table_id,
-                    tbl.page,
-                    tbl.section,
-                    tbl.caption,
-                    json.dumps(tbl.columns),
-                    json.dumps(tbl.rows),
-                    tbl.raw_text,
-                ),
-            )
-            inserted_tables += 1
-
-            # Flatten rows into table_rows
-            for row_dict in tbl.rows:
-                flat = _flatten_row(row_dict, tbl)
-                cur.execute(
-                    """
-                    INSERT INTO table_rows
-                        (table_id, page, section, process, material, thickness,
-                         voltage, current, wire_size, gas_mix, duty_cycle, raw_row)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        tbl.table_id,
-                        tbl.page,
-                        tbl.section,
-                        flat.get("process"),
-                        flat.get("material"),
-                        flat.get("thickness"),
-                        flat.get("voltage"),
-                        flat.get("current"),
-                        flat.get("wire_size"),
-                        flat.get("gas_mix"),
-                        flat.get("duty_cycle"),
-                        json.dumps(row_dict),
-                    ),
-                )
-                inserted_rows += 1
-
-        self._con.commit()
-        console.print(
-            f"[green]✓[/green] Ingested {inserted_tables} tables / {inserted_rows} rows into SQLite"
-        )
-
-    # ── Query ──────────────────────────────────────────────────────────────────
-
-    def query(
-        self,
-        process: str | None = None,
-        material: str | None = None,
-        thickness_mm: float | None = None,
-        voltage: float | None = None,
-        current: float | None = None,
-        limit: int = 10,
-    ) -> list[dict[str, Any]]:
-        """
-        Exact / fuzzy lookup of welding parameters.
-        All parameters are optional; any combination is valid.
-        Returns raw_row dicts plus page and section for citation.
-        """
-        clauses: list[str] = []
-        params: list[Any] = []
-
-        if process:
-            canonical = _normalize_process(process)
-            if canonical:
-                clauses.append("process = ?")
-                params.append(canonical)
-
-        if material:
-            clauses.append("LOWER(material) LIKE ?")
-            params.append(f"%{material.lower()}%")
-
-        if thickness_mm is not None:
-            # Allow ±15% tolerance on thickness
-            lo, hi = thickness_mm * 0.85, thickness_mm * 1.15
-            clauses.append("thickness BETWEEN ? AND ?")
-            params.extend([lo, hi])
-
-        if voltage is not None:
-            lo, hi = voltage - 2, voltage + 2
-            clauses.append("voltage BETWEEN ? AND ?")
-            params.extend([lo, hi])
-
-        if current is not None:
-            lo, hi = current * 0.85, current * 1.15
-            clauses.append("current BETWEEN ? AND ?")
-            params.extend([lo, hi])
-
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        sql = f"""
-            SELECT tr.page, tr.section, tr.raw_row,
-                   t.caption, t.table_id
-            FROM table_rows tr
-            JOIN tables t USING (table_id)
-            {where}
-            LIMIT ?
-        """
-        params.append(limit)
-        rows = self._con.execute(sql, params).fetchall()
-
-        results = []
-        for row in rows:
-            data = json.loads(row["raw_row"])
-            results.append({
-                "table_id": row["table_id"],
-                "page": row["page"],
-                "section": row["section"],
-                "caption": row["caption"],
-                "data": data,
-            })
-        return results
-
-    def get_table_by_id(self, table_id: str) -> dict | None:
-        row = self._con.execute(
-            "SELECT * FROM tables WHERE table_id = ?", (table_id,)
-        ).fetchone()
-        if not row:
-            return None
-        return {
-            "table_id": row["table_id"],
-            "page": row["page"],
-            "section": row["section"],
-            "caption": row["caption"],
-            "columns": json.loads(row["columns"]),
-            "rows": json.loads(row["rows"]),
-        }
-
-    def get_all_tables_summary(self) -> list[dict]:
-        rows = self._con.execute(
-            "SELECT table_id, page, section, caption FROM tables ORDER BY page"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def close(self):
-        self._con.close()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Helpers
-# ═══════════════════════════════════════════════════════════════════════════════
+def _infer_process(text: str) -> str | None:
+    low = text.lower()
+    return next((p for p, kws in _PROCESS_MAP.items() if any(k in low for k in kws)), None)
 
 def _normalize_process(raw: str) -> str | None:
-    low = raw.lower().strip()
-    for canonical, keywords in _PROCESS_KEYWORDS.items():
-        if any(kw in low for kw in keywords):
-            return canonical
-    return None
+    return _infer_process(raw) or raw
 
-
-def _parse_numeric(value: str) -> float | None:
-    """Extract first numeric value from a cell like '18-22V' or '200A'."""
-    import re
-    m = re.search(r"[\d]+\.?[\d]*", str(value))
-    if m:
-        try:
-            return float(m.group())
-        except ValueError:
-            pass
-    return None
-
-
-def _flatten_row(row: dict, tbl: TableRecord) -> dict[str, Any]:
-    """
-    Map raw column headers to canonical field names and extract numeric values.
-    Also infer process from section/caption if not a column.
-    """
-    flat: dict[str, Any] = {}
-
-    for col, val in row.items():
-        canonical = _FIELD_ALIASES.get(col.lower().strip())
-        if not canonical:
-            continue
-        if canonical in ("thickness", "voltage", "current", "duty_cycle"):
-            flat[canonical] = _parse_numeric(str(val))
-        else:
-            flat[canonical] = str(val).strip() if val else None
-
-    # Infer process from section or caption if not a column
-    if "process" not in flat:
-        combined = f"{tbl.section} {tbl.caption}".lower()
-        proc = _normalize_process(combined)
-        if proc:
-            flat["process"] = proc
-
-    return flat
+def _parse_html_rows(html: str) -> list[dict] | None:
+    if not html:
+        return None
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.find_all("tr")
+        if not rows:
+            return None
+        headers = [th.get_text(strip=True) for th in rows[0].find_all(["th", "td"])]
+        return [
+            dict(zip(headers, [td.get_text(strip=True) for td in row.find_all("td")]))
+            for row in rows[1:]
+        ]
+    except Exception:
+        return None
