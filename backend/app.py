@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -69,7 +69,7 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-    history: list[Message] = []
+    history: list[Message] = Field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -119,7 +119,7 @@ def health():
 def get_image(image_id: str):
     """Serve a raw extracted image by its image_id."""
     # Search images directory for matching file
-    for ext in ["png", "jpg", "jpeg", "bmp"]:
+    for ext in ["png", "jpg", "jpeg", "bmp", "webp"]:
         path = settings.images_dir / f"{image_id}.{ext}"
         if path.exists():
             return FileResponse(str(path))
@@ -150,6 +150,13 @@ def get_table(table_id: str):
     if not table:
         raise HTTPException(status_code=404, detail=f"Table {table_id} not found")
     return table
+
+
+@app.get("/api/metadata")
+def get_metadata():
+    if not settings.metadata_path.exists():
+        raise HTTPException(status_code=404, detail="Metadata not found - run ingest first")
+    return JSONResponse(content=json.loads(settings.metadata_path.read_text(encoding="utf-8")))
 
 
 # ── Dev entrypoint ─────────────────────────────────────────────────────────────

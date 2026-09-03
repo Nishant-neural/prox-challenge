@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     knowledge_dir: Path = ROOT / "knowledge"
     images_dir: Path = ROOT / "knowledge" / "images"
     screenshots_dir: Path = ROOT / "knowledge" / "screenshots"
+    metadata_path: Path = ROOT / "knowledge" / "metadata.json"
     manuals_dir: Path = ROOT / "manuals" / "pdf"
 
     # ── Chunking ───────────────────────────────────────────────────────────────
@@ -44,6 +45,8 @@ class Settings(BaseSettings):
     # ── Retrieval ─────────────────────────────────────────────────────────────
     top_k_text: int = 6
     top_k_images: int = 3
+    screenshot_scale: float = 2.0
+    image_caption_max_size: int = 1600
 
     # ── Agent ─────────────────────────────────────────────────────────────────
     max_agent_iterations: int = 8
