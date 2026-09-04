@@ -83,7 +83,40 @@ def query(
     with Session(_engine) as session:
         rows = session.scalars(stmt.limit(limit)).all()
         return [{"page": r.page, "section": r.section, "text": r.text,
-                 "process": r.process, "rows": r.rows} for r in rows]
+                 "process": r.process, "rows": r.rows, "id": str(r.id)} for r in rows]
+
+
+def get_all_tables_summary() -> list[dict[str, Any]]:
+    with Session(_engine) as session:
+        rows = session.scalars(select(ManualTable).order_by(ManualTable.page, ManualTable.id)).all()
+        return [
+            {
+                "id": str(row.id),
+                "page": row.page,
+                "section": row.section,
+                "process": row.process,
+                "preview": row.text[:160],
+            }
+            for row in rows
+        ]
+
+
+def get_table_by_id(table_id: str) -> dict[str, Any] | None:
+    if not table_id.isdigit():
+        return None
+    with Session(_engine) as session:
+        row = session.get(ManualTable, int(table_id))
+        if row is None:
+            return None
+        return {
+            "id": str(row.id),
+            "page": row.page,
+            "section": row.section,
+            "html": row.html,
+            "text": row.text,
+            "process": row.process,
+            "rows": row.rows,
+        }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -118,3 +151,11 @@ def _parse_html_rows(html: str) -> list[dict] | None:
         ]
     except Exception:
         return None
+
+
+class TableStore:
+    def get_all_tables_summary(self) -> list[dict[str, Any]]:
+        return get_all_tables_summary()
+
+    def get_table_by_id(self, table_id: str) -> dict[str, Any] | None:
+        return get_table_by_id(table_id)
